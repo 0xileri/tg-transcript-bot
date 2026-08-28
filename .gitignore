@@ -1,7 +1,10 @@
 node_modules/
 
-# Bot token lives here. Never commit it.
-.env
+# Bot token lives here. Never commit it. The glob covers editor accidents too:
+# Windows Notepad silently saves ".env" as ".env.txt", which the bare rule missed
+# and which git would then have happily committed with a live token inside.
+.env*
+!.env.example
 
 # Per-run scratch: yt-dlp writes subtitle files here and they are deleted after each
 # job. Anything left behind is a crashed run, not something to preserve.
