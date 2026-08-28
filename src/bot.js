@@ -1,0 +1,183 @@
+// Telegram transcript bot: send an X or YouTube link, get the video's captions back.
+//
+// Long-polling rather than a webhook, deliberately. Polling needs no public URL, no
+// tunnel and no TLS, so this runs on a laptop as-is. It also means YouTube sees a
+// residential IP, which it challenges far less often than a datacenter one.
+
+import { readFile, writeFile } from "node:fs/promises";
+import { findLink, probe, pickTrack, fetchCues, formatDuration } from "./extract.js";
+import { toPlainText, toSrt, toTimestamped, wordCount } from "./vtt.js";
+import {
+  MESSAGE_LIMIT, getMe, getUpdates, sendMessage,
+  editMessageText, sendChatAction, sendDocument,
+} from "./telegram.js";
+
+const OFFSET_FILE = new URL("../.offset", import.meta.url);
+
+const ALLOWED = (process.env.ALLOWED_CHAT_IDS ?? "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+const HELP = [
+  "Send me an X or YouTube link and I'll reply with the video's transcript.",
+  "",
+  "Commands:",
+  "/srt <link> — get the transcript as a subtitle file instead",
+  "/ts <link> — get it with [mm:ss] timestamps",
+  "/whoami — show your chat id, for the allowlist",
+  "",
+  "I read captions the video already carries; I don't transcribe audio.",
+  "Most YouTube videos have auto-captions. Many X videos have none at all.",
+].join("\n");
+
+// ---- output shaping -------------------------------------------------------
+
+function header({ title, uploader, duration }, track, cues) {
+  const bits = [
+    uploader ? `${title} — ${uploader}` : title,
+    [formatDuration(duration), `${wordCount(cues)} words`].filter(Boolean).join(" · "),
+    track.auto ? `auto-generated captions (${track.lang})` : `captions (${track.lang})`,
+  ];
+  return bits.join("\n");
+}
+
+async function deliver(chatId, info, track, cues, format) {
+  const head = header(info, track, cues);
+  const slug = (info.title ?? "transcript").replace(/[^\w\s-]/g, "").trim()
+    .replace(/\s+/g, "-").slice(0, 60) || "transcript";
+
+  if (format === "srt") {
+    return sendDocument(chatId, `${slug}.srt`, toSrt(cues), head);
+  }
+
+  const body = format === "ts" ? toTimestamped(cues) : toPlainText(cues);
+
+  // A transcript that overflows a Telegram message goes out as a file rather than a
+  // wall of split messages: it stays searchable, and it survives being forwarded.
+  if (body.length > MESSAGE_LIMIT) {
+    const ext = format === "ts" ? "timestamped.txt" : "txt";
+    return sendDocument(chatId, `${slug}.${ext}`, body, `${head}\n\nToo long to post inline, so here it is as a file.`);
+  }
+  return sendMessage(chatId, `${head}\n\n${body}`);
+}
+
+// ---- job ------------------------------------------------------------------
+
+async function handleLink(chatId, url, format) {
+  await sendChatAction(chatId);
+  const status = await sendMessage(chatId, "Reading that link…");
+  const note = (t) => editMessageText(chatId, status.message_id, t);
+
+  let info;
+  try {
+    info = await probe(url);
+  } catch (e) {
+    return note(e.message);
+  }
+
+  const track = pickTrack(info);
+  if (!track) {
+    const where = url.includes("youtu") ? "YouTube" : "X";
+    return note(
+      `“${info.title}” has no caption track, so there's no text to pull.\n\n` +
+      `${where} only serves captions when the uploader added them or the platform ` +
+      `generated them. I read captions rather than transcribing audio, so this one is a dead end.`,
+    );
+  }
+
+  await note(`Found “${info.title}”. Pulling ${track.auto ? "auto-" : ""}captions (${track.lang})…`);
+  await sendChatAction(chatId, format === "plain" ? "typing" : "upload_document");
+
+  let cues;
+  try {
+    cues = await fetchCues(url, track);
+  } catch (e) {
+    return note(e.message);
+  }
+
+  if (!cues.length) return note("The caption track came back empty.");
+
+  await deliver(chatId, info, track, cues, format);
+  await note(`Done — ${wordCount(cues)} words from “${info.title}”.`);
+}
+
+async function handleMessage(msg) {
+  const chatId = msg.chat?.id;
+  const text = (msg.text ?? "").trim();
+  if (!chatId || !text) return;
+
+  if (/^\/whoami\b/.test(text)) {
+    return sendMessage(chatId, `Your chat id is ${chatId}`);
+  }
+  if (ALLOWED.length && !ALLOWED.includes(String(chatId))) {
+    console.log(`ignored chat ${chatId} (not in allowlist)`);
+    return sendMessage(chatId, "This bot is private.");
+  }
+  if (/^\/(start|help)\b/.test(text)) {
+    return sendMessage(chatId, HELP);
+  }
+
+  const format = /^\/srt\b/.test(text) ? "srt" : /^\/ts\b/.test(text) ? "ts" : "plain";
+  const link = findLink(text);
+
+  if (!link) {
+    return sendMessage(chatId, "Send me an X or YouTube link. /help for the details.");
+  }
+
+  console.log(`[${chatId}] ${format} <- ${link.url}`);
+  try {
+    await handleLink(chatId, link.url, format);
+  } catch (e) {
+    console.error("job failed:", e);
+    await sendMessage(chatId, `That didn't work: ${e.message}`).catch(() => {});
+  }
+}
+
+// ---- loop -----------------------------------------------------------------
+
+async function main() {
+  if (!process.env.TELEGRAM_BOT_TOKEN) {
+    console.error("TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill it in.");
+    process.exit(1);
+  }
+
+  const me = await getMe();
+  console.log(`connected as @${me.username}`);
+  console.log(ALLOWED.length ? `allowlist: ${ALLOWED.join(", ")}` : "allowlist: off (anyone can use this bot)");
+
+  if (process.argv.includes("--selftest")) {
+    const { probe } = await import("./extract.js");
+    await probe("https://www.youtube.com/watch?v=BaW_jenozKc").then(
+      (i) => console.log(`yt-dlp works — probed "${i.title}"`),
+      (e) => { console.error(`yt-dlp check failed: ${e.message}`); process.exitCode = 1; },
+    );
+    return;
+  }
+
+  let offset = Number(await readFile(OFFSET_FILE, "utf8").catch(() => 0)) || 0;
+  let running = true;
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.on(sig, () => { console.log("\nstopping…"); running = false; });
+  }
+
+  console.log("polling for messages. ctrl-c to stop.");
+  while (running) {
+    let updates;
+    try {
+      updates = await getUpdates(offset);
+    } catch (e) {
+      // Network blips and Telegram 5xx are routine on a long poll; pause and retry.
+      console.error("poll failed:", e.message);
+      await new Promise((r) => setTimeout(r, 3000));
+      continue;
+    }
+
+    for (const update of updates) {
+      offset = update.update_id + 1;
+      // Persist before handling: a crash mid-job must not replay the same link forever.
+      await writeFile(OFFSET_FILE, String(offset)).catch(() => {});
+      if (update.message) await handleMessage(update.message);
+    }
+  }
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

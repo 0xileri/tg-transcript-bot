@@ -1,0 +1,11 @@
+node_modules/
+
+# Bot token lives here. Never commit it.
+.env
+
+# Per-run scratch: yt-dlp writes subtitle files here and they are deleted after each
+# job. Anything left behind is a crashed run, not something to preserve.
+tmp/
+
+# Long-poll cursor. Machine-local, and a stale one just replays old messages.
+.offset
