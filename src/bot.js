@@ -145,11 +145,18 @@ async function main() {
   console.log(ALLOWED.length ? `allowlist: ${ALLOWED.join(", ")}` : "allowlist: off (anyone can use this bot)");
 
   if (process.argv.includes("--selftest")) {
-    const { probe } = await import("./extract.js");
-    await probe("https://www.youtube.com/watch?v=BaW_jenozKc").then(
-      (i) => console.log(`yt-dlp works — probed "${i.title}"`),
-      (e) => { console.error(`yt-dlp check failed: ${e.message}`); process.exitCode = 1; },
-    );
+    // "Me at the zoo": the oldest video on YouTube, carries real caption tracks, and is
+    // about as unlikely to be deleted as anything on the platform. A check that fails
+    // because its own fixture rotted tells you nothing about your setup.
+    const url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+    try {
+      const info = await probe(url);
+      const track = pickTrack(info);
+      console.log(`yt-dlp works — probed "${info.title}", picked ${track ? track.lang : "no track"}`);
+    } catch (e) {
+      console.error(`yt-dlp check failed: ${e.message}`);
+      process.exitCode = 1;
+    }
     return;
   }
 
