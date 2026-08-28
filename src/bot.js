@@ -124,8 +124,13 @@ async function handleMessage(msg) {
   }
 
   console.log(`[${chatId}] ${format} <- ${link.url}`);
+  const started = Date.now();
   try {
     await handleLink(chatId, link.url, format);
+    // Success used to log nothing, which made a finished job and a hung one look
+    // identical from the terminal — the only way to tell them apart was to go count
+    // yt-dlp processes. The elapsed time also makes a slow extraction obvious.
+    console.log(`[${chatId}] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
   } catch (e) {
     console.error("job failed:", e);
     await sendMessage(chatId, `That didn't work: ${e.message}`).catch(() => {});
