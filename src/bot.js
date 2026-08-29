@@ -6,7 +6,7 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { createScheduler } from "./scheduler.js";
-import { findLink, probe, pickTrack, fetchCues, formatDuration, ytdlpVersion } from "./extract.js";
+import { findLink, probe, pickTrack, fetchCues, formatDuration, ytdlpVersion, diagnose } from "./extract.js";
 import { toPlainText, toSrt, toTimestamped, wordCount } from "./vtt.js";
 import {
   MESSAGE_LIMIT, getMe, getUpdates, sendMessage,
@@ -200,7 +200,10 @@ async function main() {
     console.error("");
     console.error("!! yt-dlp is NOT usable, so every transcript request will fail:");
     console.error(`   ${e.message}`);
-    console.error("   Check YTDLP_CMD in .env, or reinstall with: python -m pip install -U yt-dlp");
+    console.error("");
+    console.error("   Diagnostics (paste this whole block if you are asking for help):");
+    console.error(await diagnose().catch((d) => `   (diagnostics failed: ${d.message})`));
+    console.error("");
     console.error("   Starting anyway so /help still answers.");
     console.error("");
   }

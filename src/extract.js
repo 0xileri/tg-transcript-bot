@@ -138,6 +138,58 @@ function friendlyError(stderr, code) {
     : `Extraction failed with exit code ${code} and no output at all.`;
 }
 
+/**
+ * Explain why Python cannot see yt-dlp, using the exact environment the bot spawns.
+ *
+ * Asking an operator to run diagnostic commands by hand kept failing for reasons
+ * unrelated to the bug -- wrong directory, wrong shell, no output. Running it here,
+ * automatically, at the moment the preflight fails, means the answer lands in the
+ * same startup text they are already reading.
+ */
+export async function diagnose() {
+  const script = [
+    "import sys, os, site",
+    "print('  child sys.executable:', sys.executable)",
+    "pv = {k: v for k, v in os.environ.items() if k.startswith('PYTHON')}",
+    "print('  child PYTHON* vars  :', pv if pv else '(none)')",
+    "try:",
+    "    print('  user site-packages  :', site.getusersitepackages())",
+    "except Exception as e:",
+    "    print('  user site-packages  : FAILED', e)",
+    "print('  sys.path entries containing site-packages:')",
+    "hits = [p for p in sys.path if 'site-packages' in p]",
+    "print('   ', hits if hits else '(NONE -- nothing on the path can hold yt_dlp)')",
+    "try:",
+    "    import yt_dlp",
+    "    print('  import yt_dlp       : OK', yt_dlp.version.__version__)",
+    "except Exception as e:",
+    "    print('  import yt_dlp       : FAILED', type(e).__name__, e)",
+  ].join("\n");
+
+  const parentVars = Object.keys(process.env).filter((k) => k.startsWith("PYTHON"));
+  const lines = [
+    `  YTDLP_CMD           : ${YTDLP_CMD}`,
+    `  YTDLP_PYTHONPATH    : ${process.env.YTDLP_PYTHONPATH ?? "(unset)"}`,
+    `  bot PYTHON* vars    : ${parentVars.length ? parentVars.join(", ") : "(none)"}`,
+  ];
+
+  try {
+    const [cmd] = YTDLP_CMD.split(/\s+/);
+    const out = await new Promise((resolve, reject) => {
+      const c = spawn(cmd, ["-c", script], { windowsHide: true, env: childEnv() });
+      let o = "";
+      c.stdout.on("data", (d) => (o += d));
+      c.stderr.on("data", (d) => (o += d));
+      c.on("error", reject);
+      c.on("close", () => resolve(o));
+    });
+    lines.push(out.trimEnd());
+  } catch (e) {
+    lines.push(`  (could not run the interpreter at all: ${e.message})`);
+  }
+  return lines.join("\n");
+}
+
 /** yt-dlp's version string. Cheap enough to use as a startup reachability check. */
 export async function ytdlpVersion() {
   const out = await runYtdlp(["--version"], { timeoutMs: 30_000 });
