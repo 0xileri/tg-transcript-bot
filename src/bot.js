@@ -6,7 +6,7 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { createScheduler } from "./scheduler.js";
-import { findLink, probe, pickTrack, fetchCues, formatDuration } from "./extract.js";
+import { findLink, probe, pickTrack, fetchCues, formatDuration, ytdlpVersion } from "./extract.js";
 import { toPlainText, toSrt, toTimestamped, wordCount } from "./vtt.js";
 import {
   MESSAGE_LIMIT, getMe, getUpdates, sendMessage,
@@ -187,6 +187,22 @@ async function main() {
       process.exitCode = 1;
     }
     return;
+  }
+
+  // Confirm yt-dlp is reachable before announcing readiness. The bot once sat printing
+  // "polling for messages" while every single job failed on `No module named yt_dlp`:
+  // from the terminal it looked perfectly healthy, and the breakage only showed up in
+  // the replies users were getting. A bot that cannot extract should say so at startup.
+  try {
+    const v = await ytdlpVersion();
+    console.log(`yt-dlp ${v} ready`);
+  } catch (e) {
+    console.error("");
+    console.error("!! yt-dlp is NOT usable, so every transcript request will fail:");
+    console.error(`   ${e.message}`);
+    console.error("   Check YTDLP_CMD in .env, or reinstall with: python -m pip install -U yt-dlp");
+    console.error("   Starting anyway so /help still answers.");
+    console.error("");
   }
 
   let offset = Number(await readFile(OFFSET_FILE, "utf8").catch(() => 0)) || 0;

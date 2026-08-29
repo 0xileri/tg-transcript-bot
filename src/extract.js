@@ -3,11 +3,37 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { parseVtt, collapseRolling } from "./vtt.js";
 
 const YTDLP_CMD = process.env.YTDLP_CMD ?? "python -m yt_dlp";
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_SECONDS ?? 180) * 1000;
+
+/**
+ * Environment for the yt-dlp child process.
+ *
+ * pip installed yt-dlp into the per-user site-packages directory, which Python only
+ * adds to sys.path when APPDATA is set. A parent shell that spawns node without a
+ * usable APPDATA therefore produces "No module named yt_dlp" from an interpreter
+ * that runs the module perfectly well by hand -- which is precisely how this failed
+ * in production while every check here passed.
+ *
+ * Rebuilding APPDATA from USERPROFILE, and naming the user site directory on
+ * PYTHONPATH outright, makes the lookup independent of what the parent handed down.
+ */
+function childEnv() {
+  const env = { ...process.env };
+
+  if (!env.APPDATA && env.USERPROFILE) {
+    env.APPDATA = join(env.USERPROFILE, "AppData", "Roaming");
+  }
+
+  const extra = process.env.YTDLP_PYTHONPATH;
+  if (extra) {
+    env.PYTHONPATH = [env.PYTHONPATH, extra].filter(Boolean).join(delimiter);
+  }
+  return env;
+}
 
 const URL_PATTERNS = [
   { platform: "x", re: /https?:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s]+\/status\/\d+/i },
@@ -29,7 +55,7 @@ function runYtdlp(args, { timeoutMs = JOB_TIMEOUT_MS } = {}) {
   const [cmd, ...base] = YTDLP_CMD.split(/\s+/);
 
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, [...base, ...args], { windowsHide: true });
+    const child = spawn(cmd, [...base, ...args], { windowsHide: true, env: childEnv() });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -88,6 +114,12 @@ function friendlyError(stderr, code) {
   return tail
     ? `Extraction failed (exit ${code}): ${tail}`.slice(0, 400)
     : `Extraction failed with exit code ${code} and no output at all.`;
+}
+
+/** yt-dlp's version string. Cheap enough to use as a startup reachability check. */
+export async function ytdlpVersion() {
+  const out = await runYtdlp(["--version"], { timeoutMs: 30_000 });
+  return out.trim().split(/\r?\n/).pop() || "(unknown version)";
 }
 
 /** Metadata plus the list of caption tracks, without downloading anything. */
