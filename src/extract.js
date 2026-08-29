@@ -48,14 +48,22 @@ function runYtdlp(args, { timeoutMs = JOB_TIMEOUT_MS } = {}) {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) return reject(new Error(`Gave up after ${timeoutMs / 1000}s.`));
-      if (code !== 0) return reject(new Error(friendlyError(stderr)));
+      if (code !== 0) {
+        // Always keep the raw output on the console. The message sent to the user is
+        // deliberately short, and without this the operator has no way to see what
+        // yt-dlp actually said.
+        const tail = stderr.trim().split(/\r?\n/).filter(Boolean).slice(-6);
+        console.error(`yt-dlp exit ${code}:`);
+        for (const l of tail) console.error(`  ${l}`);
+        return reject(new Error(friendlyError(stderr, code)));
+      }
       resolve(stdout);
     });
   });
 }
 
 /** Map yt-dlp's stderr onto something a person can act on. */
-function friendlyError(stderr) {
+function friendlyError(stderr, code) {
   const s = stderr.toLowerCase();
   if (s.includes("no video could be found") || s.includes("no media found"))
     return "That post doesn't contain a video.";
@@ -70,8 +78,16 @@ function friendlyError(stderr) {
   if (s.includes("unsupported url"))
     return "I don't know how to read that link.";
 
-  const line = stderr.split("\n").filter((l) => l.trim().startsWith("ERROR")).pop();
-  return line ? line.replace(/^ERROR:\s*/, "").trim() : "Extraction failed.";
+  const line = stderr.split(/\r?\n/).filter((l) => l.trim().startsWith("ERROR")).pop();
+  if (line) return line.replace(/^ERROR:\s*/, "").trim();
+
+  // No ERROR line to quote. A bare "Extraction failed" here threw away the only
+  // evidence of what went wrong, leaving nothing to act on. Pass along whatever
+  // yt-dlp did say instead.
+  const tail = stderr.trim().split(/\r?\n/).filter((l) => l.trim()).slice(-2).join(" ").trim();
+  return tail
+    ? `Extraction failed (exit ${code}): ${tail}`.slice(0, 400)
+    : `Extraction failed with exit code ${code} and no output at all.`;
 }
 
 /** Metadata plus the list of caption tracks, without downloading anything. */
