@@ -164,6 +164,24 @@ export async function diagnose() {
     "    print('  import yt_dlp       : OK', yt_dlp.version.__version__)",
     "except Exception as e:",
     "    print('  import yt_dlp       : FAILED', type(e).__name__, e)",
+    // An import that fails while its directory sits on sys.path means the path was
+    // never the problem. Separating "cannot see the files" from "can read them but
+    // cannot load them" matters: the latter is what a code-integrity policy does to
+    // a user-writable directory, and no amount of path fixing will move it.
+    "for t in [p for p in sys.path if 'Roaming' in p]:",
+    "    print('  --- probing', t)",
+    "    print('    isdir            :', os.path.isdir(t))",
+    "    try:",
+    "        print('    listdir          :', os.listdir(t)[:6])",
+    "    except Exception as e:",
+    "        print('    listdir FAILED   :', type(e).__name__, e)",
+    "    init = os.path.join(t, 'yt_dlp', '__init__.py')",
+    "    print('    __init__.py isfile:', os.path.isfile(init))",
+    "    try:",
+    "        with open(init, 'rb') as fh: fh.read(64)",
+    "        print('    __init__.py read  : OK')",
+    "    except Exception as e:",
+    "        print('    __init__.py read  : FAILED', type(e).__name__, e)",
   ].join("\n");
 
   const parentVars = Object.keys(process.env).filter((k) => k.startsWith("PYTHON"));
