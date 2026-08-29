@@ -7,7 +7,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createScheduler } from "./scheduler.js";
 import { findLink, probe, pickTrack, fetchCues, formatDuration, ytdlpVersion, diagnose } from "./extract.js";
-import { toPlainText, toSrt, toTimestamped, wordCount } from "./vtt.js";
+import { toTimestamped, wordCount } from "./vtt.js";
 import {
   MESSAGE_LIMIT, getMe, getUpdates, sendMessage,
   editMessageText, sendChatAction, sendDocument,
@@ -29,9 +29,9 @@ const ALLOWED = (process.env.ALLOWED_CHAT_IDS ?? "")
 const HELP = [
   "Send me an X or YouTube link and I'll reply with the video's transcript.",
   "",
+  "Transcripts come back as [mm:ss] timestamped lines.",
+  "",
   "Commands:",
-  "/srt <link> — get the transcript as a subtitle file instead",
-  "/ts <link> — get it with [mm:ss] timestamps",
   "/whoami — show your chat id, for the allowlist",
   "",
   "I read captions the video already carries; I don't transcribe audio.",
@@ -49,29 +49,29 @@ function header({ title, uploader, duration }, track, cues) {
   return bits.join("\n");
 }
 
-async function deliver(chatId, info, track, cues, format) {
+async function deliver(chatId, info, track, cues) {
   const head = header(info, track, cues);
   const slug = (info.title ?? "transcript").replace(/[^\w\s-]/g, "").trim()
     .replace(/\s+/g, "-").slice(0, 60) || "transcript";
 
-  if (format === "srt") {
-    return sendDocument(chatId, `${slug}.srt`, toSrt(cues), head);
-  }
-
-  const body = format === "ts" ? toTimestamped(cues) : toPlainText(cues);
+  const body = toTimestamped(cues);
 
   // A transcript that overflows a Telegram message goes out as a file rather than a
   // wall of split messages: it stays searchable, and it survives being forwarded.
   if (body.length > MESSAGE_LIMIT) {
-    const ext = format === "ts" ? "timestamped.txt" : "txt";
-    return sendDocument(chatId, `${slug}.${ext}`, body, `${head}\n\nToo long to post inline, so here it is as a file.`);
+    return sendDocument(
+      chatId,
+      `${slug}.timestamped.txt`,
+      body,
+      `${head}\n\nToo long to post inline, so here it is as a file.`,
+    );
   }
   return sendMessage(chatId, `${head}\n\n${body}`);
 }
 
 // ---- job ------------------------------------------------------------------
 
-async function handleLink(chatId, url, format) {
+async function handleLink(chatId, url) {
   await sendChatAction(chatId);
   const status = await sendMessage(chatId, "Reading that link…");
   const note = (t) => editMessageText(chatId, status.message_id, t);
@@ -94,7 +94,7 @@ async function handleLink(chatId, url, format) {
   }
 
   await note(`Found “${info.title}”. Pulling ${track.auto ? "auto-" : ""}captions (${track.lang})…`);
-  await sendChatAction(chatId, format === "plain" ? "typing" : "upload_document");
+  await sendChatAction(chatId, "typing");
 
   let cues;
   try {
@@ -105,7 +105,7 @@ async function handleLink(chatId, url, format) {
 
   if (!cues.length) return note("The caption track came back empty.");
 
-  await deliver(chatId, info, track, cues, format);
+  await deliver(chatId, info, track, cues);
   await note(`Done — ${wordCount(cues)} words from “${info.title}”.`);
 }
 
@@ -125,7 +125,6 @@ async function handleMessage(msg) {
     return sendMessage(chatId, HELP);
   }
 
-  const format = /^\/srt\b/.test(text) ? "srt" : /^\/ts\b/.test(text) ? "ts" : "plain";
   const link = findLink(text);
 
   if (!link) {
@@ -144,7 +143,7 @@ async function handleMessage(msg) {
   const startedNow = jobs.submit(chatId, async () => {
     const t0 = Date.now();
     try {
-      await handleLink(chatId, link.url, format);
+      await handleLink(chatId, link.url);
       console.log(`[${chatId}] done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     } catch (e) {
       console.error(`[${chatId}] job failed: ${e.message}`);
@@ -152,7 +151,7 @@ async function handleMessage(msg) {
     }
   });
 
-  console.log(`[${chatId}] ${format} <- ${link.url}${startedNow ? "" : " (queued)"}`);
+  console.log(`[${chatId}] <- ${link.url}${startedNow ? "" : " (queued)"}`);
 
   // handleLink says nothing until it actually starts, so without this a genuinely
   // queued user sits in silence and assumes the bot is broken.
