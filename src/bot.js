@@ -8,6 +8,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createScheduler } from "./scheduler.js";
 import { findLink, probe, pickTrack, fetchCues, formatDuration, ytdlpVersion, diagnose } from "./extract.js";
 import { toTimestamped, wordCount } from "./vtt.js";
+import { writeCaption, captionConfigured } from "./caption.js";
 import {
   MESSAGE_LIMIT, getMe, getUpdates, sendMessage,
   editMessageText, sendChatAction, sendDocument,
@@ -32,6 +33,7 @@ const HELP = [
   "Transcripts come back as [mm:ss] timestamped lines.",
   "",
   "Commands:",
+  "/caption <link> — also write a publish-ready social caption from the transcript",
   "/whoami — show your chat id, for the allowlist",
   "",
   "I read captions the video already carries; I don't transcribe audio.",
@@ -69,9 +71,36 @@ async function deliver(chatId, info, track, cues) {
   return sendMessage(chatId, `${head}\n\n${body}`);
 }
 
+/**
+ * Send text that may exceed one Telegram message, split at paragraph breaks.
+ *
+ * A caption covering several clips runs well past the limit, and a caption is meant
+ * to be copied out of the chat, so it stays as messages rather than becoming a file
+ * attachment the way a long transcript does.
+ */
+async function sendLongMessage(chatId, text) {
+  if (text.length <= MESSAGE_LIMIT) return sendMessage(chatId, text);
+
+  let buf = "";
+  for (const para of text.split(/\n\n+/)) {
+    if (buf && buf.length + 2 + para.length > MESSAGE_LIMIT) {
+      await sendMessage(chatId, buf);
+      buf = "";
+    }
+    buf = buf ? `${buf}\n\n${para}` : para;
+
+    // A single paragraph longer than the limit has nowhere natural to break.
+    while (buf.length > MESSAGE_LIMIT) {
+      await sendMessage(chatId, buf.slice(0, MESSAGE_LIMIT));
+      buf = buf.slice(MESSAGE_LIMIT);
+    }
+  }
+  if (buf) await sendMessage(chatId, buf);
+}
+
 // ---- job ------------------------------------------------------------------
 
-async function handleLink(chatId, url) {
+async function handleLink(chatId, url, { caption = false } = {}) {
   await sendChatAction(chatId);
   const status = await sendMessage(chatId, "Reading that link…");
   const note = (t) => editMessageText(chatId, status.message_id, t);
@@ -106,7 +135,27 @@ async function handleLink(chatId, url) {
   if (!cues.length) return note("The caption track came back empty.");
 
   await deliver(chatId, info, track, cues);
-  await note(`Done — ${wordCount(cues)} words from “${info.title}”.`);
+
+  if (!caption) {
+    return note(`Done — ${wordCount(cues)} words from “${info.title}”.`);
+  }
+
+  // Captioning runs on the transcript that was just delivered, so the timestamps the
+  // model cites line up with the lines above it in the chat.
+  await note(`Transcript above. Writing the caption…`);
+  await sendChatAction(chatId, "typing");
+
+  try {
+    const text = await writeCaption(toTimestamped(cues), {
+      title: info.title,
+      uploader: info.uploader,
+      url,
+    });
+    await sendLongMessage(chatId, text);
+    await note(`Done — ${wordCount(cues)} words from “${info.title}”, plus a caption.`);
+  } catch (e) {
+    await note(`Transcript worked, but the caption didn't: ${e.message}`);
+  }
 }
 
 async function handleMessage(msg) {
@@ -125,10 +174,17 @@ async function handleMessage(msg) {
     return sendMessage(chatId, HELP);
   }
 
+  const caption = /^\/caption\b/.test(text);
   const link = findLink(text);
 
   if (!link) {
     return sendMessage(chatId, "Send me an X or YouTube link. /help for the details.");
+  }
+  if (caption && !captionConfigured()) {
+    return sendMessage(
+      chatId,
+      "Captioning needs an Anthropic API key. Add ANTHROPIC_API_KEY to .env and restart me.",
+    );
   }
 
   // Cap per person so one user cannot fill the queue. Their in-flight job counts,
@@ -143,7 +199,7 @@ async function handleMessage(msg) {
   const startedNow = jobs.submit(chatId, async () => {
     const t0 = Date.now();
     try {
-      await handleLink(chatId, link.url);
+      await handleLink(chatId, link.url, { caption });
       console.log(`[${chatId}] done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     } catch (e) {
       console.error(`[${chatId}] job failed: ${e.message}`);

@@ -4,10 +4,15 @@
   "description": "Telegram bot: send an X or YouTube link, get the video's transcript back.",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node --env-file=.env src/bot.js",
     "check": "node --env-file=.env src/bot.js --selftest",
     "test": "node --test test/scheduler.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.122.0"
   }
 }
