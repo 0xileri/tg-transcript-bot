@@ -141,22 +141,22 @@ async function handleMessage(msg) {
     );
   }
 
-  const started = jobs.submit(chatId, async () => {
-    const started = Date.now();
+  const startedNow = jobs.submit(chatId, async () => {
+    const t0 = Date.now();
     try {
       await handleLink(chatId, link.url, format);
-      console.log(`[${chatId}] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+      console.log(`[${chatId}] done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     } catch (e) {
       console.error(`[${chatId}] job failed: ${e.message}`);
       await sendMessage(chatId, `That did not work: ${e.message}`).catch(() => {});
     }
   });
 
-  console.log(`[${chatId}] ${format} <- ${link.url}${started ? "" : " (queued)"}`);
+  console.log(`[${chatId}] ${format} <- ${link.url}${startedNow ? "" : " (queued)"}`);
 
   // handleLink says nothing until it actually starts, so without this a genuinely
   // queued user sits in silence and assumes the bot is broken.
-  if (!started) {
+  if (!startedNow) {
     await sendMessage(chatId, `Queued — ${jobs.waiting} ahead of you.`).catch(() => {});
   }
 }

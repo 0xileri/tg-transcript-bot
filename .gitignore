@@ -12,3 +12,6 @@ tmp/
 
 # Long-poll cursor. Machine-local, and a stale one just replays old messages.
 .offset
+
+# Local troubleshooting script, not part of the bot.
+diag.mjs

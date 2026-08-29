@@ -12,17 +12,24 @@ const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_SECONDS ?? 180) * 1000;
 /**
  * Environment for the yt-dlp child process.
  *
- * pip installed yt-dlp into the per-user site-packages directory, which Python only
- * adds to sys.path when APPDATA is set. A parent shell that spawns node without a
- * usable APPDATA therefore produces "No module named yt_dlp" from an interpreter
- * that runs the module perfectly well by hand -- which is precisely how this failed
- * in production while every check here passed.
+ * pip installed yt-dlp into the per-user site-packages directory, so anything that
+ * stops Python consulting that directory produces "No module named yt_dlp" from an
+ * interpreter that runs the module perfectly well by hand. That failure appeared in
+ * production while every check from a freshly spawned shell passed, because a fresh
+ * shell does not carry whatever the long-lived one had set.
  *
- * Rebuilding APPDATA from USERPROFILE, and naming the user site directory on
- * PYTHONPATH outright, makes the lookup independent of what the parent handed down.
+ * Two inherited variables can cause it, so neither is trusted:
+ *   PYTHONNOUSERSITE - skips per-user site-packages outright. Nothing here wants it.
+ *   APPDATA          - names the directory; without it the user site path is not built.
+ *
+ * YTDLP_PYTHONPATH is the manual escape hatch: entries on PYTHONPATH reach sys.path
+ * regardless of either variable, so pointing it at the site-packages directory fixes
+ * any case these two do not.
  */
 function childEnv() {
   const env = { ...process.env };
+
+  delete env.PYTHONNOUSERSITE;
 
   if (!env.APPDATA && env.USERPROFILE) {
     env.APPDATA = join(env.USERPROFILE, "AppData", "Roaming");
@@ -88,6 +95,20 @@ function runYtdlp(args, { timeoutMs = JOB_TIMEOUT_MS } = {}) {
   });
 }
 
+/**
+ * Strip local filesystem paths from text bound for a user.
+ *
+ * These messages are delivered over Telegram and the bot is public, so a stranger's
+ * failed link must not come back carrying the operator's directory layout. That has
+ * already happened once: a module error replied with the full interpreter path. The
+ * console keeps the unredacted output, which is where an operator should be looking.
+ */
+function redact(text) {
+  return text
+    .replace(/[A-Za-z]:\\[^\s"']*/g, "<path>")
+    .replace(/\/(?:home|Users)\/[^\s"']*/g, "<path>");
+}
+
 /** Map yt-dlp's stderr onto something a person can act on. */
 function friendlyError(stderr, code) {
   const s = stderr.toLowerCase();
@@ -105,14 +126,14 @@ function friendlyError(stderr, code) {
     return "I don't know how to read that link.";
 
   const line = stderr.split(/\r?\n/).filter((l) => l.trim().startsWith("ERROR")).pop();
-  if (line) return line.replace(/^ERROR:\s*/, "").trim();
+  if (line) return redact(line.replace(/^ERROR:\s*/, "").trim());
 
   // No ERROR line to quote. A bare "Extraction failed" here threw away the only
   // evidence of what went wrong, leaving nothing to act on. Pass along whatever
   // yt-dlp did say instead.
   const tail = stderr.trim().split(/\r?\n/).filter((l) => l.trim()).slice(-2).join(" ").trim();
   return tail
-    ? `Extraction failed (exit ${code}): ${tail}`.slice(0, 400)
+    ? redact(`Extraction failed (exit ${code}): ${tail}`).slice(0, 400)
     : `Extraction failed with exit code ${code} and no output at all.`;
 }
 
