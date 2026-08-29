@@ -30,6 +30,7 @@ function childEnv() {
   const env = { ...process.env };
 
   delete env.PYTHONNOUSERSITE;
+  delete env.PYTHONUSERBASE;
 
   if (!env.APPDATA && env.USERPROFILE) {
     env.APPDATA = join(env.USERPROFILE, "AppData", "Roaming");
