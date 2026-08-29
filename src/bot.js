@@ -187,7 +187,18 @@ async function main() {
       offset = update.update_id + 1;
       // Persist before handling: a crash mid-job must not replay the same link forever.
       await writeFile(OFFSET_FILE, String(offset)).catch(() => {});
-      if (update.message) await handleMessage(update.message);
+      if (update.message) {
+        // A failure serving one person must not end the bot for everyone else. This
+        // process was killed in production by `Forbidden: bot was blocked by the user`
+        // -- somebody messaged the bot, blocked it before the reply landed, and the
+        // send threw straight past the loop into main(). Any per-message throw now
+        // stays with that message.
+        try {
+          await handleMessage(update.message);
+        } catch (e) {
+          console.error(`[${update.message.chat?.id}] dropped: ${e.message}`);
+        }
+      }
     }
   }
 }
