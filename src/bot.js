@@ -5,6 +5,7 @@
 // residential IP, which it challenges far less often than a datacenter one.
 
 import { readFile, writeFile } from "node:fs/promises";
+import { createScheduler } from "./scheduler.js";
 import { findLink, probe, pickTrack, fetchCues, formatDuration } from "./extract.js";
 import { toPlainText, toSrt, toTimestamped, wordCount } from "./vtt.js";
 import {
@@ -13,6 +14,14 @@ import {
 } from "./telegram.js";
 
 const OFFSET_FILE = new URL("../.offset", import.meta.url);
+
+// Jobs used to run inline with the poll loop: the bot awaited each extraction before
+// reading the next batch of updates, so a single 30-second video stalled everyone else
+// and the bot looked dead rather than busy.
+const jobs = createScheduler({
+  maxConcurrent: Number(process.env.MAX_CONCURRENT_JOBS ?? 3),
+  maxPerUser: Number(process.env.MAX_QUEUED_PER_USER ?? 2),
+});
 
 const ALLOWED = (process.env.ALLOWED_CHAT_IDS ?? "")
   .split(",").map((s) => s.trim()).filter(Boolean);
@@ -123,17 +132,32 @@ async function handleMessage(msg) {
     return sendMessage(chatId, "Send me an X or YouTube link. /help for the details.");
   }
 
-  console.log(`[${chatId}] ${format} <- ${link.url}`);
-  const started = Date.now();
-  try {
-    await handleLink(chatId, link.url, format);
-    // Success used to log nothing, which made a finished job and a hung one look
-    // identical from the terminal — the only way to tell them apart was to go count
-    // yt-dlp processes. The elapsed time also makes a slow extraction obvious.
-    console.log(`[${chatId}] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
-  } catch (e) {
-    console.error("job failed:", e);
-    await sendMessage(chatId, `That didn't work: ${e.message}`).catch(() => {});
+  // Cap per person so one user cannot fill the queue. Their in-flight job counts,
+  // so this is a limit on outstanding work, not on links sent over time.
+  if (jobs.outstandingFor(chatId) >= jobs.maxPerUser) {
+    return sendMessage(
+      chatId,
+      `You already have ${jobs.maxPerUser} links in progress. Let those finish and send this one again.`,
+    );
+  }
+
+  const started = jobs.submit(chatId, async () => {
+    const started = Date.now();
+    try {
+      await handleLink(chatId, link.url, format);
+      console.log(`[${chatId}] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+    } catch (e) {
+      console.error(`[${chatId}] job failed: ${e.message}`);
+      await sendMessage(chatId, `That did not work: ${e.message}`).catch(() => {});
+    }
+  });
+
+  console.log(`[${chatId}] ${format} <- ${link.url}${started ? "" : " (queued)"}`);
+
+  // handleLink says nothing until it actually starts, so without this a genuinely
+  // queued user sits in silence and assumes the bot is broken.
+  if (!started) {
+    await sendMessage(chatId, `Queued — ${jobs.waiting} ahead of you.`).catch(() => {});
   }
 }
 
